@@ -1,0 +1,342 @@
+//! 抖音宿主（Douyin host）在 Rust 侧的胶水。
+//!
+//! 适配层 `addons/bevy-douyin/runtime/adapter.js` 负责所有 `tt.*` 调用，并把
+//! 宿主事实挂在 JS 全局对象上。游戏只读这些全局，不直接碰 `tt`：
+//!
+//! | 全局（默认前缀 `__bevy_douyin_`） | 方向 | 内容 |
+//! | --- | --- | --- |
+//! | `Canvas` | JS → Rust | 逻辑画布尺寸 `{width, height}` |
+//! | `SafeArea` | JS → Rust | 安全区 inset、屏幕尺寸、胶囊按钮矩形 |
+//! | `Theme` | 双向 | `"dark"` / `"light"` |
+//! | `SetTheme(value)` | Rust → JS | 覆盖系统主题 |
+//! | `AdStatus` | JS → Rust | `idle/loading/ended/skipped/error/unavailable` |
+//! | `ShowAd(kind)` | Rust → JS | 拉起激励视频，返回是否成功受理 |
+//!
+//! 注意：抖音的 wasm 运行时里 `eval` 不可用（`TypeError: eval is not a
+//! function`），而 `GameGlobal` 也不在 wasm 的全局对象上；适配层会把 shim
+//! `window` 同时装到 `globalThis`，因此这里用 `js_sys::global()` 取
+//! `window`，再 `Reflect::get` 读属性。
+
+use bevy::prelude::*;
+
+/// 画布的设计宽度（逻辑像素）。高度由画布宽高比推导。
+pub const DESIGN_WIDTH: f32 = 720.0;
+/// 适配层默认的全局前缀；必须和 `game.js` 的 `globalPrefix` 一致。
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub const GLOBAL_PREFIX: &str = "__bevy_douyin_";
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SafeArea {
+    /// 安全区距离屏幕边缘的距离，单位是 **CSS px**（不是画布像素）。
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub screen_width: f32,
+    #[allow(dead_code)]
+    pub screen_height: f32,
+    /// 右上角胶囊（菜单按钮）的底边，CSS px；没有胶囊时为 0。
+    pub menu_bottom: f32,
+}
+
+/// 由宿主画布/安全区推导出的世界坐标系布局。
+///
+/// 相机始终把宽度固定为 [`DESIGN_WIDTH`]，高度跟随画布宽高比；因此高屏手机
+/// 会获得更高（而不是被拉伸）的游戏区域。所有距离都在“世界像素”里。
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct View {
+    /// 世界坐标宽度，恒为 720。
+    pub width: f32,
+    /// 世界坐标高度 = 720 * canvas_h / canvas_w。
+    pub height: f32,
+    /// 安全区相对屏幕边缘的内缩，已换算到世界坐标。
+    pub inset_left: f32,
+    pub inset_top: f32,
+    pub inset_right: f32,
+    pub inset_bottom: f32,
+    /// 真实画布尺寸（用于把指针位置换算到世界坐标）。
+    pub canvas_w: f32,
+    pub canvas_h: f32,
+    /// 画布像素 → 世界像素的比例：`DESIGN_WIDTH / canvas_w`。
+    pub px_to_world: f32,
+}
+
+impl View {
+    /// 把指针（画布像素，左上角原点）换算成世界坐标（中心原点，y 向上）。
+    pub fn pointer(&self, canvas_pos: Vec2) -> Vec2 {
+        Vec2::new(
+            (canvas_pos.x - self.canvas_w * 0.5) * self.px_to_world,
+            (self.canvas_h * 0.5 - canvas_pos.y) * self.px_to_world,
+        )
+    }
+
+    fn from_parts(canvas_w: f32, canvas_h: f32, safe: SafeArea) -> Self {
+        let canvas_w = canvas_w.max(1.0);
+        let canvas_h = canvas_h.max(1.0);
+        let px_to_world = DESIGN_WIDTH / canvas_w;
+        let screen_w = if safe.screen_width > 1.0 {
+            safe.screen_width
+        } else {
+            canvas_w
+        };
+        let css_to_world = DESIGN_WIDTH / screen_w;
+        // 顶部要让开胶囊按钮：安全区 top 和胶囊底边取较大者。
+        let top_css = safe.top.max(safe.menu_bottom);
+        Self {
+            width: DESIGN_WIDTH,
+            height: canvas_h * px_to_world,
+            inset_left: safe.left * css_to_world,
+            inset_top: top_css * css_to_world,
+            inset_right: safe.right * css_to_world,
+            inset_bottom: safe.bottom * css_to_world,
+            canvas_w,
+            canvas_h,
+            px_to_world,
+        }
+    }
+}
+
+/// 宿主桥。字段全部是普通 Rust 值，所以作为 Bevy `Resource` 没有线程问题。
+#[derive(Resource, Debug, Clone)]
+pub struct Host {
+    canvas_w: f32,
+    canvas_h: f32,
+    safe: SafeArea,
+}
+
+impl Default for Host {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Host {
+    /// 读取适配层发布的宿主信息。非 wasm 构建返回 720×1280 的桌面默认值，
+    /// 这样 `cargo check` / IDE 补全不需要目标设备。
+    pub fn new() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let canvas = host_global("Canvas");
+            let canvas_w = number(&canvas, "width").unwrap_or(DESIGN_WIDTH);
+            let canvas_h = number(&canvas, "height").unwrap_or(1280.0);
+
+            let area = host_global("SafeArea");
+            let safe = SafeArea {
+                left: number(&area, "left").unwrap_or(0.0),
+                top: number(&area, "top").unwrap_or(0.0),
+                right: number(&area, "right").unwrap_or(0.0),
+                bottom: number(&area, "bottom").unwrap_or(0.0),
+                screen_width: number(&area, "screenWidth").unwrap_or(canvas_w),
+                screen_height: number(&area, "screenHeight").unwrap_or(canvas_h),
+                menu_bottom: number(
+                    &js_sys::Reflect::get(&area, &JsValue::from_str("menuButton"))
+                        .unwrap_or(JsValue::UNDEFINED),
+                    "bottom",
+                )
+                .unwrap_or(0.0),
+            };
+
+            Self {
+                canvas_w,
+                canvas_h,
+                safe,
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                canvas_w: DESIGN_WIDTH,
+                canvas_h: 1280.0,
+                safe: SafeArea {
+                    screen_width: DESIGN_WIDTH,
+                    screen_height: 1280.0,
+                    ..default()
+                },
+            }
+        }
+    }
+
+    pub fn canvas(&self) -> (u32, u32) {
+        (self.canvas_w as u32, self.canvas_h as u32)
+    }
+
+    pub fn view(&self) -> View {
+        View::from_parts(self.canvas_w, self.canvas_h, self.safe)
+    }
+
+    /// 读取系统主题（`"dark"` / `"light"`）。
+    pub fn theme(&self) -> Option<Theme> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            host_global("Theme")
+                .as_string()
+                .and_then(|s| Theme::parse(&s))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            None
+        }
+    }
+
+    /// 覆盖系统主题（同时会更新适配层里的 `Theme` 全局）。
+    pub fn set_theme(&self, theme: Theme) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let set = host_global("SetTheme");
+            if let Ok(set) = set.dyn_into::<js_sys::Function>() {
+                let _ = set.call1(&JsValue::UNDEFINED, &JsValue::from_str(theme.as_str()));
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = theme;
+    }
+
+    /// 拉起一次激励视频。`false` 表示适配层/宿主没有可用的广告位，
+    /// 游戏应当走本地 mock 流程（示例里是直接给奖励）。
+    pub fn show_ad(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let show = host_global("ShowAd");
+            if let Ok(show) = show.dyn_into::<js_sys::Function>() {
+                return show
+                    .call1(&JsValue::UNDEFINED, &JsValue::from_str("rewarded"))
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+            }
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    }
+
+    /// 激励视频状态：`idle/loading/ended/skipped/error/unavailable`。
+    pub fn ad_status(&self) -> Option<String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            host_global("AdStatus").as_string()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            None
+        }
+    }
+
+    /// 读取整数存档。适配层的 `localStorage` 落在 `tt.setStorageSync` 上，
+    /// 重开小游戏仍然存在。
+    pub fn load_u32(&self, key: &str) -> Option<u32> {
+        self.load_str(key)?.parse().ok()
+    }
+
+    pub fn save_u32(&self, key: &str, value: u32) {
+        self.save_str(key, &value.to_string());
+    }
+
+    pub fn load_str(&self, key: &str) -> Option<String> {
+        let value = storage_call("getItem", &JsValue::from_str(key), &JsValue::UNDEFINED);
+        value.and_then(|v| v.as_string())
+    }
+
+    pub fn save_str(&self, key: &str, value: &str) {
+        storage_call(
+            "setItem",
+            &JsValue::from_str(key),
+            &JsValue::from_str(value),
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+}
+
+// ── wasm 侧的小工具 ────────────────────────────────────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue};
+
+#[cfg(target_arch = "wasm32")]
+fn js_window() -> JsValue {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("window")).unwrap_or(JsValue::UNDEFINED)
+}
+
+/// 读取适配层发布的全局，例如 `host_global("Canvas")`。
+#[cfg(target_arch = "wasm32")]
+fn host_global(name: &str) -> JsValue {
+    let key = format!("{GLOBAL_PREFIX}{name}");
+    js_sys::Reflect::get(&js_window(), &JsValue::from_str(&key)).unwrap_or(JsValue::UNDEFINED)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn number(obj: &JsValue, key: &str) -> Option<f32> {
+    js_sys::Reflect::get(obj, &JsValue::from_str(key))
+        .ok()
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+}
+
+/// 调用 `window.localStorage.<method>(a, b)`。
+#[cfg(target_arch = "wasm32")]
+fn storage_call(method: &str, a: &JsValue, b: &JsValue) -> Option<JsValue> {
+    let storage = js_sys::Reflect::get(&js_window(), &JsValue::from_str("localStorage")).ok()?;
+    if !storage.is_object() {
+        return None;
+    }
+    let func = js_sys::Reflect::get(&storage, &JsValue::from_str(method)).ok()?;
+    let func: js_sys::Function = func.dyn_into().ok()?;
+    func.call2(&storage, a, b).ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn storage_call(_method: &str, _a: &JsValue, _b: &JsValue) -> Option<JsValue> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+use fake_js::JsValue;
+
+/// 桌面构建只需要让类型存在；真正的实现永远走不到。
+#[cfg(not(target_arch = "wasm32"))]
+mod fake_js {
+    #[derive(Debug, Clone, Default)]
+    pub struct JsValue;
+
+    impl JsValue {
+        pub const UNDEFINED: Self = Self;
+        pub fn from_str(_: &str) -> Self {
+            Self
+        }
+        pub fn as_string(&self) -> Option<String> {
+            None
+        }
+    }
+}

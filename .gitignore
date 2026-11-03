@@ -1,0 +1,12 @@
+# Rust
+/target
+**/target
+
+# 构建产物（game.js / game.json / project.config.json 是手写文件，要提交）
+/platforms/douyin/package/pong.js
+/platforms/douyin/package/pong.wasm.br
+/platforms/douyin/package/runtime/
+/platforms/douyin/package/assets/
+
+# macOS
+.DS_Store

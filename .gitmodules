@@ -1,0 +1,4 @@
+[submodule "addons/bevy-douyin"]
+	path = addons/bevy-douyin
+	url = git@gitee.com:pppkin/bevy_douyin.git
+	branch = main
