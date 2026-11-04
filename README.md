@@ -92,7 +92,10 @@ assets/              有 assets/ 时才出现
 - **三种输入**：触摸、模拟器鼠标、键盘。触摸和合成鼠标事件会去重，一次点击只触发一次。
 - **主题**：启动读取系统主题；未手动选择时每 4 秒跟随。手动切换后由适配层固定，并写入存档。
 - **激励视频**：用 `RequestAd` 拿 ticket，用 `AdResult` 对账；空广告位走 600ms mock，换真实广告位不用改 Rust。
-- **纯 Sprite**：没有图片、字体和音频，分数用计分块表示，产物只有 wasm 和 JS。
+- **纯 Sprite + 内嵌音效**：没有图片和字体，分数用计分块表示；三段 WAV 用
+  `include_bytes!` 编进 wasm，不依赖资源服务器。
+- **原生音频**：`bevy_audio` 经 `rodio → cpal → WebAudio` 输出，碰球、撞墙、得分
+  各有音效；切后台自动 suspend。
 - **本地存档**：最高对拉、双方胜场、主题都走适配层存储，并用 `storagePrefix` 隔离。
 - **设备诊断**：设 `GameGlobal.__probe = 1` 可看诊断日志；panic 时会弹 `tt.showModal`。
 
@@ -139,11 +142,20 @@ INITIAL_MEMORY_BYTES=$((32*1024*1024)) ./build.sh
 | `wins.player` | `pong.wins.player` | 玩家胜场 |
 | `theme` | `pong.theme` | `dark` / `light` |
 
+### 音效
+
+音效在 `assets/audio/`：`hit.wav`（碰球）、`wall.wav`（撞墙）、`score.wav`
+（得分）。构建时不会把它们复制进小游戏包，而是在 `game.rs` 里直接
+`include_bytes!` 进 wasm。换音效时保持 44.1kHz 单声道 16-bit PCM，体积最小。
+
+要加背景音乐，建议用远程 URL 或 `tt.createInnerAudioContext`；抖音包内文件
+不能用 `fetch` 读取。
+
 ## 目录结构
 
 ```text
 .
-├── addons/bevy-douyin/      适配层 submodule（tag adapter-v0.3.0）
+├── addons/bevy-douyin/      适配层 submodule（tag adapter-v0.4.0）
 ├── build.sh                 构建入口
 ├── docs/
 │   ├── adapter-contract.md  适配层契约

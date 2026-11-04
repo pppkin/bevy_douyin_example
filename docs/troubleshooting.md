@@ -329,6 +329,34 @@ info!("tap={:?} theme={:?} chip={:?}", tap, theme_center, chip_center);
 
 ---
 
+## 5.5 音频
+
+先确认启动日志：
+
+```text
+[bevy-douyin:pong] audio: context ready sampleRate=44100 state=running
+```
+
+**没有这行**：适配层低于 0.4，或 `tt.getAudioContext` 不可用。模拟器会回退到
+原生 `AudioContext`；真机需要基础库 1.34.0+。
+
+**`No audio device found`**：cpal 没拿到上下文。检查是否升级到了 0.4，以及是否
+在 `adapter.install()` 之前初始化了 Bevy。
+
+**有上下文但没声音**：
+
+- `state=suspended`：iOS 需要用户手势。点一下屏幕，适配层会在 `touchstart`
+  时 `resume()`；
+- 系统静音键、音量、蓝牙耳机；
+- 确认 `Cargo.toml` 里有 `bevy_audio` + `wav`（或实际使用的格式）；
+- WAV 必须是常见 PCM 头；`include_bytes!` 路径从源文件算起；
+- 切后台会 `suspend()`，回前台应自动 `resume()`。
+
+**换音效后没声**：`./build.sh` 重新构建，wasm 里的字节是编译期嵌入的，改文件
+不会热更新。
+
+---
+
 ## 6. 真机 vs 模拟器
 
 | 现象 | 可能原因 |

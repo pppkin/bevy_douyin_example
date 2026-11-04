@@ -3,10 +3,12 @@
 //! 所有图形都是纯色 `Sprite`：示例不打包任何资源，构建产物只有 wasm + JS。
 //! 分数用 7 个“计分块”表示；顶部中央的菱形在追平/刷新纪录时点亮。
 
+use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings};
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 use bevy::time::Virtual;
 use bevy::window::PrimaryWindow;
+use std::sync::Arc;
 
 use crate::host::{Host, Theme, View, DESIGN_WIDTH};
 
@@ -226,6 +228,21 @@ struct AdProgress;
 #[derive(Component)]
 struct ThemeButton;
 
+/// 音效直接编译进 wasm，不经过资源服务器。
+///
+/// 这样示例在小游戏环境里不依赖 `fetch` / 文件系统，也能验证
+/// `bevy_audio` → rodio → cpal → WebAudio 这条完整链路。
+#[derive(Resource, Clone)]
+struct Sfx {
+    hit: Handle<AudioSource>,
+    wall: Handle<AudioSource>,
+    score: Handle<AudioSource>,
+}
+
+fn play_sfx(commands: &mut Commands, handle: &Handle<AudioSource>) {
+    commands.spawn((AudioPlayer(handle.clone()), PlaybackSettings::DESPAWN));
+}
+
 struct Palette {
     bg: Color,
     frame: Color,
@@ -346,7 +363,24 @@ pub fn build(app: &mut App) {
         );
 }
 
-fn setup(mut commands: Commands, view: Res<View>, field: Res<Field>) {
+fn setup(
+    mut commands: Commands,
+    mut assets: ResMut<Assets<AudioSource>>,
+    view: Res<View>,
+    field: Res<Field>,
+) {
+    commands.insert_resource(Sfx {
+        hit: assets.add(AudioSource {
+            bytes: Arc::from(&include_bytes!("../../../assets/audio/hit.wav")[..]),
+        }),
+        wall: assets.add(AudioSource {
+            bytes: Arc::from(&include_bytes!("../../../assets/audio/wall.wav")[..]),
+        }),
+        score: assets.add(AudioSource {
+            bytes: Arc::from(&include_bytes!("../../../assets/audio/score.wav")[..]),
+        }),
+    });
+
     let camera = commands
         .spawn((
             Camera2d,
@@ -635,6 +669,8 @@ fn step_ball(
     mut ball_query: Query<(&mut Ball, &mut Transform, &mut Visibility), Without<Trail>>,
     mut trail_query: Query<(&Trail, &mut Transform), (Without<Ball>, Without<Paddle>)>,
     paddles: Query<(&Paddle, &Transform), (Without<Ball>, Without<Trail>)>,
+    sfx: Res<Sfx>,
+    mut commands: Commands,
 ) {
     let dt = time.delta_secs().min(0.033);
     let Ok((mut ball, mut transform, mut visibility)) = ball_query.single_mut() else {
@@ -678,9 +714,11 @@ fn step_ball(
                 if transform.translation.y > field.top - half {
                     transform.translation.y = field.top - half;
                     ball.vel.y = -ball.vel.y.abs();
+                    play_sfx(&mut commands, &sfx.wall);
                 } else if transform.translation.y < field.bottom + half {
                     transform.translation.y = field.bottom + half;
                     ball.vel.y = ball.vel.y.abs();
+                    play_sfx(&mut commands, &sfx.wall);
                 }
 
                 for (paddle, paddle_transform) in &paddles {
@@ -700,6 +738,7 @@ fn step_ball(
                             let speed = (ball.vel.length() * 1.05).min(1180.0);
                             let angle = offset * 0.85;
                             ball.vel = Vec2::new(dir * angle.cos(), angle.sin()) * speed;
+                            play_sfx(&mut commands, &sfx.hit);
                             game.rally += 1;
                             if game.rally > game.best_rally {
                                 game.best_rally = game.rally;
@@ -727,6 +766,7 @@ fn step_ball(
             ball.history[0] = transform.translation.truncate();
 
             if let Some(winner) = scorer {
+                play_sfx(&mut commands, &sfx.score);
                 game.score[winner.index()] += 1;
                 game.flash = 0.55;
                 game.serve_dir = if winner == Side::Player { -1.0 } else { 1.0 };
@@ -803,6 +843,8 @@ fn handle_taps(
     mut look: ResMut<Look>,
     mut ads: ResMut<Ads>,
     fx: Res<Effects>,
+    sfx: Res<Sfx>,
+    mut commands: Commands,
 ) {
     let mut taps: Vec<Vec2> = Vec::new();
     for touch in touches.iter_just_pressed() {
@@ -838,6 +880,7 @@ fn handle_taps(
         if (tap - theme_center).abs().cmple(Vec2::splat(30.0)).all() {
             look.theme = look.theme.flipped();
             look.custom = true;
+            play_sfx(&mut commands, &sfx.hit);
             host.set_theme(look.theme);
             host.save_str("theme", look.theme.as_str());
             info!("pong: theme -> {}", look.theme.as_str());

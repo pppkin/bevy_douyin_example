@@ -1,6 +1,6 @@
 # 适配层契约
 
-本文记录 `addons/bevy-douyin`（tag `adapter-v0.3.0`）对外承诺的行为，以及本示例
+本文记录 `addons/bevy-douyin`（tag `adapter-v0.4.0`）对外承诺的行为，以及本示例
 依赖了其中哪些部分。改适配层或升级 tag 之后，建议对照本文重新验证。
 
 涉及的文件：
@@ -74,7 +74,7 @@ fn host_global(name: &str) -> JsValue {
 
 | 全局 | 类型 | 方向 | 说明 |
 | --- | --- | --- | --- |
-| `Version` | `string` | JS → Rust | 适配层版本，如 `"0.3.0"` |
+| `Version` | `string` | JS → Rust | 适配层版本，如 `"0.4.0"` |
 | `Config` | 见下 | JS → Rust | 归一化后的启动配置 |
 | `Layout` | 见下 | JS → Rust | 画布 / 安全区 / 屏幕 / dpr / 序号，一次读全 |
 | `ViewportSeq` | `number` | JS → Rust | 每次尺寸变化 +1 |
@@ -342,19 +342,36 @@ AdResult; // { ticket, kind, status, reason, isEnded, mock } 或 null
 
 ---
 
-## 9. 适配层没有提供 / 不能依赖的东西
+## 9. 音频
+
+适配层 0.4 安装了全局 `AudioContext`：优先 `tt.getAudioContext()`，模拟器回退到
+原生 `AudioContext`。Bevy 打开 `bevy_audio` + `wav` 后，`AudioPlayer` 会经
+`rodio → cpal → WebAudio` 直接出声。
+
+本示例的三段音效在 `assets/audio/`，用 `include_bytes!` 编进 wasm；不经过
+`AssetServer`，因为抖音读不到包内文件。启动日志会出现：
+
+```text
+audio: context ready sampleRate=44100 state=running
+```
+
+第一次触摸会 `resume()` 上下文（iOS 手势限制）；切后台 `suspend()`，回前台
+`resume()`。
+
+---
+
+## 10. 适配层没有提供 / 不能依赖的东西
 
 - **`eval`**：抖音 wasm 运行时里不可用，抛 `TypeError: eval is not a function`。
 - **`GameGlobal`**：wasm 侧看不到；它只在小游戏 JS 主环境里。
 - **真正的 DOM**：`document` 是 shim，只覆盖 winit/bevy 用到的少量接口。
 - **多 canvas / 离屏 canvas**：适配层只创建一个游戏画布。
-- **音频**：本示例没启用 `bevy_audio`；需要音频时要确认适配层对 `AudioContext`
-  的 shim 情况。
+- **包内资源读取**：`fetch` 和 `FileSystemManager` 都读不到包内文件，资源要内嵌。
 - **横屏**：`game.json` 固定竖屏，适配层的尺寸推导也按竖屏设计。
 
 ---
 
-## 10. 升级适配层时重点回归
+## 11. 升级适配层时重点回归
 
 1. `Canvas` / `SafeArea` / `Layout` 字段是否变化（尤其 `menuButton` 和 `seq`）；
 2. `RequestAd` 的 ticket 语义、`AdResult` 字段和 `AdStatus` 枚举；
@@ -362,6 +379,7 @@ AdResult; // { ticket, kind, status, reason, isEnded, mock } 或 null
 4. `ThemeManual` / `FollowTheme` 是否仍然区分"手动"和"跟随"；
 5. `storagePrefix` 的过滤和 `clear()` 范围；
 6. `patch_glue.py` 是否仍匹配 wasm-bindgen 0.2.129 的输出；
-7. `tools/build.sh` 的 wasm-opt 参数是否仍排除 `--all-features`。
+7. 音频：`audio: context ready` 是否出现，前后台切换是否恢复；
+8. `tools/build.sh` 的 wasm-opt 参数是否仍排除 `--all-features`。
 
 升级后至少跑一遍 [device-checklist.md](device-checklist.md) 的模拟器部分。

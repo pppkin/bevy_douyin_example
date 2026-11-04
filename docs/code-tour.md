@@ -274,6 +274,32 @@ Error(t) ──t 归零──> Idle
 `Pending` 期间再点胶囊不会重复请求（`matches!(ads.phase, AdPhase::Idle)` 且
 `fx.slowmo <= 0` 才受理）。
 
+### 3.9 音效
+
+`Sfx` 资源在 `setup` 里把三段 WAV 通过 `include_bytes!` 读进来，交给
+`Assets<AudioSource>`：
+
+```rust
+let bytes = include_bytes!("../../../assets/audio/hit.wav");
+let sound = assets.add(AudioSource { bytes: Arc::from(&bytes[..]) });
+```
+
+三个触发点：
+
+| 事件 | 音效 | 位置 |
+| --- | --- | --- |
+| 撞墙 | `wall.wav`（330Hz） | `step_ball` 的左右墙反弹 |
+| 碰球拍 | `hit.wav`（660Hz） | `step_ball` 的 paddle 碰撞 |
+| 得分 | `score.wav`（880Hz） | `step_ball` 的计分分支 |
+| 切主题 | `hit.wav` | `handle_taps` |
+
+`play_sfx` 每次 `commands.spawn((AudioPlayer(handle.clone()), PlaybackSettings::DESPAWN))`，
+播完自动回收。音效很轻，不需要对象池。
+
+适配层 0.4 提供 `AudioContext`；`bevy_audio → rodio → cpal` 在 wasm 上走
+WebAudio。启动日志 `audio: context ready sampleRate=44100 state=running` 出现
+就说明上下文可用。第一次触摸前可能处于 `suspended`，适配层会自动 `resume()`。
+
 ---
 
 ## 4. 诊断（probe.rs）
@@ -303,7 +329,8 @@ panic 钩子始终生效：把 `file:line` 和消息通过 `tt.showModal({title:
 | --- | --- |
 | 更快/更慢 | `game.rs` 顶部的发球速度、加速系数、AI 速度 |
 | 改成 11 分制 | `WIN_SCORE`，计分块数量（`setup` 里的循环） |
-| 加音效 | `Cargo.toml` 加 `bevy_audio`，在碰撞/得分处触发；先确认适配层音频能力 |
+| 换音效 | 替换 `assets/audio/*.wav`，保持 44.1kHz 单声道 16-bit |
+| 加背景音乐 | 用 `tt.createInnerAudioContext` 或远程 URL；包内文件不能用 `fetch` |
 | 加文字 | 需要字体资源与 `bevy_text`，并处理资源拷贝（适配层会把 `assets/` 拷进包） |
 | 横屏 | `game.json` 改 `landscape`，同时调整 `game.js` 的 `width/height` 与布局 |
 | 换配色 | `Palette::of` 两组颜色 |

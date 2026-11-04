@@ -12,7 +12,7 @@ git clone --recurse-submodules <本仓库地址>
 cd bevy_douyin_example
 
 git submodule status
-#  74c563f8c1679ebb0000187605d024791b3b8dea addons/bevy-douyin (adapter-v0.3.0)
+#  d4bba07eef4870bafdcb3160bea43676a00c8f55 addons/bevy-douyin (adapter-v0.4.0)
 ```
 
 预期：版本号前**没有** `-` 或 `+`。`-` 表示没初始化，`+` 表示 submodule 的
@@ -23,7 +23,7 @@ HEAD 和父仓库记录不一致。
 ```bash
 git submodule update --init --recursive
 # 如果之前手动 checkout 过别的分支：
-git -C addons/bevy-douyin checkout adapter-v0.3.0  # 74c563f
+git -C addons/bevy-douyin checkout adapter-v0.4.0  # d4bba07
 git add addons/bevy-douyin
 ```
 
@@ -78,9 +78,9 @@ brew install esbuild     # 可选
 首次约 3 分钟（Bevy 全量编译），之后增量 1~2 分钟。预期结尾能看到：
 
 ```
--rw-r--r--  ... 63K  platforms/douyin/package/pong.js
+-rw-r--r--  ... 66K  platforms/douyin/package/pong.js
 -rw-r--r--  ... 2.3M  platforms/douyin/package/pong.wasm.br
--rw-r--r--  ... 27K  platforms/douyin/package/runtime/adapter.js
+-rw-r--r--  ... 28K  platforms/douyin/package/runtime/adapter.js
 -rw-r--r--  ... 2.0K platforms/douyin/package/runtime/bootstrap.js
 ```
 
@@ -133,10 +133,11 @@ douyinide simulator-compile -c OpenCode --window-id <id>
 ```
 runtime installed: canvas=720x1561 screen=393x852 TTWebAssembly=true probe=off
 theme: manual dark
-pong: adapter 0.3.0 (dpr 1, viewport seq 1, ad mock true)
+pong: adapter 0.4.0 (dpr 1, viewport seq 1, ad mock true)
 pong: canvas 720x1561 -> world 720x1561, safe insets 0.0/185.0/0.0/62.3,
       best rally 0, wins AI 0 / player 0
 pong: app foreground, virtual clock resumed
+[bevy-douyin:pong] audio: context ready sampleRate=44100 state=running
 ```
 
 （最后一行较长，这里为了排版换行。数值随机型变化；顶部 inset 应该明显大于 0，
@@ -155,6 +156,7 @@ pong: app foreground, virtual clock resumed
 | 7 | 打满 7 分 | 边框闪胜者色，2.8s 后比分归零，胜场 +1 |
 | 8 | 重开小游戏 | 胜场/最高连击保留 |
 | 9 | 系统切深色/浅色（工具菜单） | 未手动切换过时，约 4 秒内跟随（适配层轮询间隔） |
+| 10 | 碰球/撞墙/得分 | 能听到对应短音效，控制台无 `audio`/`decode` 报错 |
 
 ### 截图与取色验证（可选）
 
@@ -192,6 +194,7 @@ douyinide miniapp-image-screenshot -c OpenCode --window-id <id>
 | 主题 | 跟随系统设置；手动切换后不再被系统覆盖 |
 | 广告 | 有广告位时应拉起真实激励视频；看完才给慢动作，中途关闭不给 |
 | 存档 | 杀掉小游戏重进，胜场/纪录仍在 |
+| 音频 | 第一次触摸后有声；切后台再回来能恢复；静音键/耳机下行为正常 |
 | 前后台 | 切后台再回来不黑屏、不卡死、球不飞出场地 |
 | panic | 若崩溃，应弹出 `PANIC` 弹窗而不是静默退出 |
 
@@ -224,7 +227,7 @@ diag: update #1 t=0.016 cams=1 sprites=27 clear=(0.035,0.047,0.086,1) win=720x15
 - [ ] 真机跑过"切后台 / 断网 / 低电量"三种情况；
 - [ ] 主题、存档、广告、触摸四项回归通过；
 - [ ] `git status` 里没有误提交 `pong.js` / `pong.wasm.br` / `runtime/`；
-- [ ] submodule 指向 `adapter-v0.3.0`（或你验证过的新 tag）。
+- [ ] submodule 指向 `adapter-v0.4.0`（或你验证过的新 tag）。
 
 ---
 
