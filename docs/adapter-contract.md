@@ -1,6 +1,6 @@
 # 适配层契约
 
-本文记录 `addons/bevy-douyin`（tag `adapter-v0.2.1`）对外承诺的行为，以及本示例
+本文记录 `addons/bevy-douyin`（tag `adapter-v0.2.2`）对外承诺的行为，以及本示例
 依赖了其中哪些部分。改适配层或升级 tag 之后，建议对照本文重新验证。
 
 涉及的文件：
@@ -220,24 +220,31 @@ if let Some((then, at)) = *last_tap {
 
 | 情况 | 返回 | `AdStatus` |
 | --- | --- | --- |
-| 没有 `adUnitId` | `false` | `unavailable` |
+| 没有 `adUnitId`，默认 `mockAds !== false` | `true`（适配层 mock） | `loading` → `ended`（默认） |
+| 没有 `adUnitId`，`mockAds: false` | `false` | `unavailable` |
 | 有广告位，拉起成功 | `true` | `loading` → `ended` / `skipped` |
 | 拉起失败 | `true`（内部会重试 load） | `error` |
 
 `onClose` 会发布 `ended`（看完）或 `skipped`（中途关闭）；`onError` 发布 `error`。
 
-适配层**没有内置 mock**。`template/package/game.js` 的注释说"留空走 mock"，实际
-需要游戏自己实现。本示例的策略（`Ads` 资源）：
+适配层 0.2.2 起**内置 mock**：`AdMock` 会变成 `true`，默认 600ms 后发布 `ended`。
+可用 `mockAdDelay`（毫秒）、`mockAdResult`（`ended` / `skipped` / `error`）、
+`mockAds: false`（关闭）控制。真实广告拉起时 `AdMock` 为 `false`。
+
+本示例的策略（`Ads` 资源）：
 
 ```
 点击胶囊
   ├─ ShowAd() == true  → AdPhase::Pending，轮询 AdStatus
-  │                        ended      → 给奖励
+  │                        ended      → 给奖励（真实广告或适配层 mock 都可能）
   │                        skipped    → 取消
   │                        error      → 取消
   │                        超时 30s   → 取消
-  └─ ShowAd() == false → AdPhase::Mock(0.9s) → 给奖励
+  └─ ShowAd() == false → AdPhase::Mock(0.9s) → 给奖励（本地兜底）
 ```
+
+适配层 mock 本身不上屏、不阻塞输入；真机接真实广告位时只改 `game.js` 的
+`AD_UNIT_ID`，Rust 侧与游戏状态机都不变。
 
 奖励是 8 秒慢动作：`Time<Virtual>::set_relative_speed(0.45)`，用 `Time<Real>`
 计时，避免慢动作把自己的倒计时也拖慢。配置真实广告位只需要改 `game.js` 的

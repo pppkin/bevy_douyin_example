@@ -5,7 +5,7 @@
 submodule 的形式引入：
 
 ```
-addons/bevy-douyin  →  https://gitee.com/pppkin/bevy_douyin  (tag: adapter-v0.2.1)
+addons/bevy-douyin  →  https://gitee.com/pppkin/bevy_douyin  (tag: adapter-v0.2.2)
 ```
 
 本仓库是适配层的**配套示例**：它刻意保持小，但把"从零把一个 Bevy 游戏接到抖音"
@@ -30,8 +30,10 @@ addons/bevy-douyin  →  https://gitee.com/pppkin/bevy_douyin  (tag: adapter-v0.
 - **三种输入**：触摸拖动、模拟器鼠标、键盘 `↑/↓`（或 `W/S`）。触摸与合成鼠标
   事件会去重，一次点击只触发一次。
 - **主题**：启动读取系统主题，每 4 秒跟随系统变化；左上角按钮可手动切换并持久化。
-- **激励视频**：底部胶囊是广告入口。没有配置广告位时走**本地 mock**（0.9 秒后
-  直接给奖励），配置真实 `adUnitId` 后同一套代码走真实激励视频，Rust 侧不用改。
+- **激励视频**：底部胶囊是广告入口。没有配置广告位时由适配层内置 mock 返回
+  `loading → ended`（默认 600ms，可用 `mockAdDelay` 调整），配置真实 `adUnitId`
+  后同一套代码走真实激励视频，Rust 侧不用改。游戏自己还保留了 `ShowAd() == false`
+  时的 0.9 秒本地兜底（例如显式设置 `mockAds: false`）。
 - **纯 Sprite，零资源**：没有图片、字体、音频；分数用 7 个计分块表示，产物只有
   wasm + JS。
 - **本地存档**：最高连续对拉、双方胜场、主题，走适配层的 `localStorage`
@@ -116,7 +118,7 @@ assets/              有 assets/ 目录时才会出现
 | 按住屏幕上下拖动 / 移动鼠标 | 控制右侧球拍 |
 | `↑` `↓` / `W` `S` | 键盘控制右侧球拍 |
 | 点击左上角方块 | 切换深色 / 浅色主题（会存档） |
-| 点击底部黄色胶囊 | 请求激励视频；无广告位时走 mock，获得 8 秒慢动作 |
+| 点击底部黄色胶囊 | 请求激励视频；无广告位时走适配层 mock，获得 8 秒慢动作 |
 | 静止 1.5 秒 | 球拍自动跟随球（方便模拟器里挂机观察） |
 
 先到 7 分者赢一局，胜场会累计；顶部中央的菱形在追平或刷新最高连续对拉时点亮。
@@ -125,7 +127,7 @@ assets/              有 assets/ 目录时才会出现
 
 ```
 .
-├── addons/bevy-douyin/          适配层 submodule（tag adapter-v0.2.1）
+├── addons/bevy-douyin/          适配层 submodule（tag adapter-v0.2.2）
 ├── build.sh                     构建入口（参数翻译 + 透传）
 ├── rust-toolchain.toml          stable + wasm32 target
 ├── docs/
@@ -180,7 +182,7 @@ game.js
 
 - 只有竖屏；`game.json` 写死 `"deviceOrientation": "portrait"`。
 - 没有音频、文字和图片资源，音效/字体需要自己加 `bevy_audio` 等特性。
-- 示例的 `adUnitId` 为空，广告走 mock；真广告位需要在抖音后台创建激励视频广告位。
+- 示例的 `adUnitId` 为空，广告由适配层 mock；真广告位需要在抖音后台创建激励视频广告位。
 - 只在抖音开发者工具模拟器完整验证过；真机差异与检查项见
   [docs/device-checklist.md](docs/device-checklist.md)。
-- 适配层固定在 `adapter-v0.2.1`。升级 submodule 后要重新跑一遍设备检查清单。
+- 适配层固定在 `adapter-v0.2.2`。升级 submodule 后要重新跑一遍设备检查清单。

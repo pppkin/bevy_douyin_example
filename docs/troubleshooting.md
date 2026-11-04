@@ -280,12 +280,16 @@ info!("tap={:?} theme={:?} chip={:?}", tap, theme_center, chip_center);
 
 按顺序排查：
 
-1. `AD_UNIT_ID` 是否为空？空 → `ShowAd` 返回 false → 应走 mock（0.9s 后给奖励）。
-2. 控制台有没有 `pong: no ad slot, using local mock`？
-   - 没有 → 点击没命中热区（胶囊中心 `(0, bottom-52)`，半尺寸 110×36）。
-3. 有广告位但没拉起 → `tt.createRewardedVideoAd` 可能不可用，`AdStatus` 会是
+1. `AD_UNIT_ID` 是否为空？空且没有关 mock → 适配层应打印
+   `ad mock kind=rewarded result=ended delay=600ms`，约 0.6s 后
+   `ad mock finished: ended`，随后游戏打印 `pong: rewarded ad ended, slow-mo granted`。
+2. 只有看到 `pong: no ad slot, using local mock` 才是游戏自己的 0.9s 兜底，
+   说明 `ShowAd` 返回了 false（通常是 `mockAds: false` 或广告位创建失败）。
+3. 控制台完全没有广告日志 → 点击没命中热区（胶囊中心 `(0, bottom-52)`，
+   半尺寸 110×36）。
+4. 有广告位但没拉起 → `tt.createRewardedVideoAd` 可能不可用，`AdStatus` 会是
    `unavailable` 或 `error`。
-4. `Pending` 状态下再点不会重复请求，等 30 秒超时或状态结束。
+5. `Pending` 状态下再点不会重复请求，等 30 秒超时或状态结束。
 
 ### 5.2 看完广告没给奖励
 
@@ -303,7 +307,14 @@ info!("tap={:?} theme={:?} chip={:?}", tap, theme_center, chip_center);
 
 ### 5.3 模拟器永远走 mock
 
-模拟器通常没有真实广告位，这是预期。要验证真实流程必须用真机 + 真实 `adUnitId`。
+适配层 0.2.2 起，没有 `adUnitId` 时由适配层直接模拟，模拟器上这是预期。
+要验证真实流程必须用真机 + 真实 `adUnitId`；也可以设置 `mockAdResult: 'skipped'`
+验证中途关闭分支。
+
+### 5.4 适配层 mock 和游戏兜底重复给奖励
+
+不会。适配层 mock 会同步返回 `true`，游戏进入 `Pending` 等待 `AdStatus`，不会
+再走 `AdPhase::Mock`。只有 `ShowAd` 返回 `false` 时才走 0.9s 本地兜底。
 
 ---
 

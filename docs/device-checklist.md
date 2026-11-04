@@ -12,7 +12,7 @@ git clone --recurse-submodules <本仓库地址>
 cd bevy_douyin_example
 
 git submodule status
-#  a280be628c5d7c2bca2cf5ccf4e50255a905c211 addons/bevy-douyin (adapter-v0.2.1)
+#  da4addad8e5698b9bff8db8fef9922be2fc3a1c6 addons/bevy-douyin (adapter-v0.2.2)
 ```
 
 预期：版本号前**没有** `-` 或 `+`。`-` 表示没初始化，`+` 表示 submodule 的
@@ -23,7 +23,7 @@ HEAD 和父仓库记录不一致。
 ```bash
 git submodule update --init --recursive
 # 如果之前手动 checkout 过别的分支：
-git -C addons/bevy-douyin checkout adapter-v0.2.1
+git -C addons/bevy-douyin checkout adapter-v0.2.2
 git add addons/bevy-douyin
 ```
 
@@ -146,7 +146,7 @@ pong: canvas 720x1561 -> world 720x1561, safe insets 0.0/185.0/0.0/62.3,
 | 2 | 点击左上角方块 | 主题在深/浅之间切换，**只切换一次** |
 | 3 | 再点一次 | 切回，控制台各出现一条 `pong: theme ->` |
 | 4 | 重开小游戏 | 主题保持上次选择 |
-| 5 | 点击底部胶囊 | 无广告位时：`pong: no ad slot, using local mock` → 0.9s 后 `mock ad finished, slow-mo granted`，球明显变慢 8 秒 |
+| 5 | 点击底部胶囊 | 无广告位时：适配层 `ad mock kind=rewarded result=ended delay=600ms` → `ad mock finished: ended` → 游戏 `pong: rewarded ad ended, slow-mo granted`，球明显变慢 8 秒 |
 | 6 | 挂机 1.5s | 右拍自动跟球（模拟器没有指针事件时的兜底） |
 | 7 | 打满 7 分 | 边框闪胜者色，2.8s 后比分归零，胜场 +1 |
 | 8 | 重开小游戏 | 胜场/最高连击保留 |
@@ -220,7 +220,7 @@ diag: update #1 t=0.016 cams=1 sprites=27 clear=(0.035,0.047,0.086,1) win=720x15
 - [ ] 真机跑过"切后台 / 断网 / 低电量"三种情况；
 - [ ] 主题、存档、广告、触摸四项回归通过；
 - [ ] `git status` 里没有误提交 `pong.js` / `pong.wasm.br` / `runtime/`；
-- [ ] submodule 指向 `adapter-v0.2.1`（或你验证过的新 tag）。
+- [ ] submodule 指向 `adapter-v0.2.2`（或你验证过的新 tag）。
 
 ---
 

@@ -246,6 +246,10 @@ Idle ──点击──> ShowAd() true ──> Pending ──AdStatus ended─�
 Error(t) ──t 归零──> Idle
 ```
 
+适配层 0.2.2 起，空 `adUnitId` 会由适配层返回 `true` 并异步发布
+`loading → ended`，因此示例走的是上面的 `Pending` 分支；`AdPhase::Mock(0.9s)`
+只是 `ShowAd` 返回 `false`（例如 `mockAds: false`）时的本地兜底。
+
 奖励 = `fx.slowmo = 8.0`，`tick_effects` 把 `Time<Virtual>` 的
 `relative_speed` 设为 0.45。倒计时用 `Time<Real>`，否则慢动作会把自己的 8 秒
 也拉长。

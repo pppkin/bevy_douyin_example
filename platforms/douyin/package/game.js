@@ -5,8 +5,9 @@
 // pong.wasm.br / runtime/，不会改这个文件。
 var runtime = require('./runtime/bootstrap.js');
 
-// 留空 = 适配层没有广告位，`ShowAd` 返回 false，游戏走本地 mock
-// （见 platforms/douyin/src/game.rs 的 AdPhase::Mock）。
+// 留空 = 没有真实广告位，适配层 0.2.2 起会内置 mock（默认 600ms 后返回 ended）。
+// 可用 mockAds / mockAdDelay / mockAdResult 调整；ShowAd 返回 false 时游戏还会走
+// 0.9s 本地兜底（见 src/game.rs 的 AdPhase::Mock）。
 // 换成真实激励视频广告位后，Rust 侧不需要改动。
 var AD_UNIT_ID = '';
 
