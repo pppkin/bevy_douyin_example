@@ -169,7 +169,7 @@ pub fn pointer(&self, canvas_pos: Vec2) -> Vec2 {
 | `update_ai` | 预测落点 + 摆动 → 左拍，速度随比分/回合提升，上限 980/s |
 | `step_ball` | 发球、子步进物理、挡板反弹、计分、拖尾、胜负 |
 | `handle_taps` | 主题按钮、广告胶囊；触摸/鼠标去重 |
-| `sync_environment` | 每 30 帧跟随系统主题（手动切换后停止）；按 `AppState` 暂停虚拟时钟 |
+| `sync_environment` | 每 30 帧跟随系统主题（手动切换后停止）；按 `AppState` 暂停虚拟时钟；布局仍在启动时固定（见限制） |
 | `tick_effects` | 慢动作计时、广告状态机推进、闪光衰减 |
 | `paint_scene` | 按主题上色、更新计分块/进度条/胜者边框 |
 
