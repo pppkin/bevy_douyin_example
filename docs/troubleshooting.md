@@ -224,9 +224,12 @@ let top_css = safe.top.max(safe.menu_button_bottom);
 ### 3.3 主题不跟随系统 / 切换后又被改回去
 
 - 只在手动切换前跟随系统；点过主题按钮后 `Look.custom = true`，停止跟随，这是
-  预期行为。
+  预期行为。0.3 起适配层也会保持手动值（`ThemeManual = true`），系统切换不会把
+  `Theme` 改回去；要恢复跟随，Rust 侧调用 `FollowTheme()`（示例保留了这个 API，
+  但没有做"恢复跟随"按钮）。
 - 适配层每 4 秒轮询一次系统主题，系统切换后最多约 4 秒生效；游戏侧再每 30 帧
-  读一次 `Theme`。如果一直不生效，先确认 `tt.onThemeChange` 是否被宿主触发。
+  读一次 `Theme`。如果一直不生效，先确认 `ThemeManual` 是否为 `false`，再确认
+  `tt.onThemeChange` 是否被宿主触发。
 
 ---
 
@@ -281,40 +284,48 @@ info!("tap={:?} theme={:?} chip={:?}", tap, theme_center, chip_center);
 按顺序排查：
 
 1. `AD_UNIT_ID` 是否为空？空且没有关 mock → 适配层应打印
-   `ad mock kind=rewarded result=ended delay=600ms`，约 0.6s 后
-   `ad mock finished: ended`，随后游戏打印 `pong: rewarded ad ended, slow-mo granted`。
-2. 只有看到 `pong: no ad slot, using local mock` 才是游戏自己的 0.9s 兜底，
-   说明 `ShowAd` 返回了 false（通常是 `mockAds: false` 或广告位创建失败）。
+   `ad mock kind=rewarded result=ended delay=600ms ticket=1`，游戏打印
+   `pong: rewarded ad requested ticket=1`，约 0.6s 后
+   `ad result ticket=1 status=ended reason=mock` 和 `ad mock finished: ended`，
+   随后 `pong: rewarded ad ended ticket=1 mock=true reason=mock, slow-mo granted`。
+2. 只有看到 `pong: ad request rejected (...)` 才是游戏自己的 0.9s 兜底，说明
+   `RequestAd` 返回了 0（通常是 `mockAds: false`、已有请求在处理，或广告位创建
+   失败）；括号里是 `AdStatus` / `AdLastError`。
 3. 控制台完全没有广告日志 → 点击没命中热区（胶囊中心 `(0, bottom-52)`，
    半尺寸 110×36）。
-4. 有广告位但没拉起 → `tt.createRewardedVideoAd` 可能不可用，`AdStatus` 会是
-   `unavailable` 或 `error`。
-5. `Pending` 状态下再点不会重复请求，等 30 秒超时或状态结束。
+4. 有广告位但没拉起 → 看 `AdReason`：`create-failed` 表示
+   `tt.createRewardedVideoAd` 不可用，`show-failed` / `retry-failed` 表示拉起
+   失败，`timeout` 表示 30s 内没有终态。
+5. `Pending` 状态下再点不会重复请求（`RequestAd` 返回 0），等 `AdResult` 或
+   30 秒超时。
 
 ### 5.2 看完广告没给奖励
 
-看 `AdStatus`：
+看 `AdResult`（先用 `ticket` 确认是不是当前这一单）：
 
-| 状态 | 结果 |
+| `status` / `reason` | 结果 |
 | --- | --- |
-| `ended` | 给奖励 |
+| `ended`（`isEnded=true`） | 给奖励 |
 | `skipped` | 不给（`Error` 提示 1.2s） |
 | `error` / `unavailable` | 不给 |
-| 30 秒无状态变化 | 超时，不给 |
+| `error` + `reason=timeout` | 30 秒无终态，不给 |
 
 真机上 `ended` 只在 `onClose({isEnded: true})` 时发布；有些基础库版本字段不同，
-升级适配层时要回归。
+升级适配层时要回归。若日志里的 ticket 与游戏记录的不一致，说明是上一单的迟到
+回调，游戏会忽略。
 
 ### 5.3 模拟器永远走 mock
 
 适配层 0.2.2 起，没有 `adUnitId` 时由适配层直接模拟，模拟器上这是预期。
 要验证真实流程必须用真机 + 真实 `adUnitId`；也可以设置 `mockAdResult: 'skipped'`
-验证中途关闭分支。
+或 `'error'` 验证中途关闭/失败分支，设置 `mockAdDelay: 5000` 验证 Pending 期间
+重复点击不会重复请求。
 
 ### 5.4 适配层 mock 和游戏兜底重复给奖励
 
-不会。适配层 mock 会同步返回 `true`，游戏进入 `Pending` 等待 `AdStatus`，不会
-再走 `AdPhase::Mock`。只有 `ShowAd` 返回 `false` 时才走 0.9s 本地兜底。
+不会。适配层 mock 会让 `RequestAd` 返回非 0 ticket，游戏进入 `Pending` 等待
+`AdResult`，不会再走 `AdPhase::Mock`。只有 `RequestAd` 返回 0 时才走 0.9s 本地
+兜底；两者互斥。
 
 ---
 

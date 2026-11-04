@@ -98,11 +98,11 @@ impl Match {
         Self {
             score: [0, 0],
             wins: [
-                host.load_u32("pong.wins.ai").unwrap_or(0),
-                host.load_u32("pong.wins.player").unwrap_or(0),
+                host.load_u32("wins.ai").unwrap_or(0),
+                host.load_u32("wins.player").unwrap_or(0),
             ],
             rally: 0,
-            best_rally: host.load_u32("pong.best_rally").unwrap_or(0),
+            best_rally: host.load_u32("best_rally").unwrap_or(0),
             phase: Phase::Serve(1.2),
             serve_dir: 1.0,
             flash: 0.0,
@@ -135,6 +135,8 @@ struct Effects {
 #[derive(Resource)]
 struct Ads {
     phase: AdPhase,
+    /// 本次请求的票据；只接受同一张票据的 `AdResult`。
+    ticket: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,6 +153,7 @@ impl Default for Ads {
     fn default() -> Self {
         Self {
             phase: AdPhase::Idle,
+            ticket: 0,
         }
     }
 }
@@ -164,7 +167,7 @@ struct Look {
 
 impl Look {
     fn load(host: &Host) -> Self {
-        let saved = host.load_str("pong.theme").as_deref().and_then(Theme::parse);
+        let saved = host.load_str("theme").as_deref().and_then(Theme::parse);
         Self {
             theme: saved.or_else(|| host.theme()).unwrap_or(Theme::Dark),
             custom: saved.is_some(),
@@ -293,6 +296,18 @@ pub fn build(app: &mut App) {
     let game = Match::load(host);
     let field = Field::from_view(&view);
 
+    if look.custom {
+        // 存档里保存了手动主题；0.3 的手动选择会一直生效，启动时同步给适配层。
+        host.set_theme(look.theme);
+    }
+
+    info!(
+        "pong: adapter {} (dpr {}, viewport seq {}, ad mock {})",
+        host.version(),
+        host.device_pixel_ratio(),
+        host.viewport_seq(),
+        host.ad_mock(),
+    );
     info!(
         "pong: canvas {}x{} -> world {}x{}, safe insets {:.1}/{:.1}/{:.1}/{:.1}, best rally {}, wins AI {} / player {}",
         view.canvas_w,
@@ -688,7 +703,7 @@ fn step_ball(
                             game.rally += 1;
                             if game.rally > game.best_rally {
                                 game.best_rally = game.rally;
-                                host.save_u32("pong.best_rally", game.best_rally);
+                                host.save_u32("best_rally", game.best_rally);
                                 info!("pong: new best rally {}", game.best_rally);
                             }
                         }
@@ -724,9 +739,9 @@ fn step_ball(
                     game.wins[winner.index()] += 1;
                     host.save_u32(
                         if winner == Side::Player {
-                            "pong.wins.player"
+                            "wins.player"
                         } else {
-                            "pong.wins.ai"
+                            "wins.ai"
                         },
                         game.wins[winner.index()],
                     );
@@ -824,7 +839,7 @@ fn handle_taps(
             look.theme = look.theme.flipped();
             look.custom = true;
             host.set_theme(look.theme);
-            host.save_str("pong.theme", look.theme.as_str());
+            host.save_str("theme", look.theme.as_str());
             info!("pong: theme -> {}", look.theme.as_str());
             continue;
         }
@@ -833,19 +848,48 @@ fn handle_taps(
             && fx.slowmo <= 0.0
             && matches!(ads.phase, AdPhase::Idle)
         {
-            if host.show_ad() {
+            let ticket = host.request_ad();
+            if ticket > 0 {
+                ads.ticket = ticket;
                 ads.phase = AdPhase::Pending(0.0);
-                info!("pong: rewarded ad requested");
+                info!("pong: rewarded ad requested ticket={ticket}");
             } else {
+                // 适配层拒绝：正在播另一个广告，或配置了广告位但拉起失败。
+                // 示例选择本地 mock，保证玩法仍可演示。
+                ads.ticket = 0;
                 ads.phase = AdPhase::Mock(0.9);
-                info!("pong: no ad slot, using local mock");
+                info!(
+                    "pong: ad request rejected ({:?} / {:?}), using local mock",
+                    host.ad_status(),
+                    host.ad_last_error(),
+                );
             }
         }
     }
 }
 
-fn sync_environment(host: Res<Host>, mut look: ResMut<Look>, mut tick: Local<u32>) {
+fn sync_environment(
+    host: Res<Host>,
+    mut look: ResMut<Look>,
+    mut virtual_time: ResMut<Time<Virtual>>,
+    mut tick: Local<u32>,
+    mut last_state: Local<Option<String>>,
+) {
     *tick += 1;
+
+    // 切到后台时暂停虚拟时钟，避免回到前台时一次性补上几秒的 dt。
+    let state = host.app_state();
+    if last_state.as_deref() != Some(state.as_str()) {
+        if state == "background" {
+            virtual_time.pause();
+            info!("pong: app background, virtual clock paused");
+        } else if !state.is_empty() {
+            virtual_time.unpause();
+            info!("pong: app foreground, virtual clock resumed");
+        }
+        *last_state = Some(state);
+    }
+
     if look.custom || tick.wrapping_add(1) % 30 != 0 {
         return;
     }
@@ -876,30 +920,42 @@ fn tick_effects(
         virtual_time.set_relative_speed(wanted);
     }
 
-    match ads.phase {
-        AdPhase::Idle | AdPhase::Error(_) | AdPhase::Mock(_) => {}
-        AdPhase::Pending(waited) => {
-            let status = host.ad_status().unwrap_or_default();
-            match status.as_str() {
-                "ended" => {
-                    grant_slowmo(&mut fx);
-                    ads.phase = AdPhase::Idle;
-                    info!("pong: rewarded ad ended, slow-mo granted");
+    if let AdPhase::Pending(waited) = ads.phase {
+        // 0.3 的 `AdResult` 带 ticket，只有和本次请求一致才算数；适配层本身
+        // 也会在 30s 后以 reason=timeout 结束，这里的 32s 只是双保险。
+        if let Some(result) = host.ad_result() {
+            if result.ticket == ads.ticket {
+                match result.status.as_str() {
+                    "ended" if result.is_ended => {
+                        grant_slowmo(&mut fx);
+                        ads.phase = AdPhase::Idle;
+                        info!(
+                            "pong: rewarded ad ended ticket={} mock={} reason={}, slow-mo granted",
+                            result.ticket, result.mock, result.reason,
+                        );
+                    }
+                    "skipped" => {
+                        ads.phase = AdPhase::Error(1.0);
+                        info!("pong: rewarded ad skipped ticket={}", result.ticket);
+                    }
+                    other => {
+                        ads.phase = AdPhase::Error(1.2);
+                        info!(
+                            "pong: rewarded ad failed ticket={} status={} reason={} last_error={:?}",
+                            result.ticket,
+                            other,
+                            result.reason,
+                            host.ad_last_error(),
+                        );
+                    }
                 }
-                "skipped" => {
-                    ads.phase = AdPhase::Error(1.0);
-                    info!("pong: rewarded ad skipped");
-                }
-                "error" | "unavailable" => {
-                    ads.phase = AdPhase::Error(1.2);
-                    info!("pong: rewarded ad failed ({status})");
-                }
-                _ if waited > 30.0 => {
-                    ads.phase = AdPhase::Error(1.2);
-                    info!("pong: rewarded ad timed out");
-                }
-                _ => ads.phase = AdPhase::Pending(waited + dt),
+                ads.ticket = 0;
             }
+        } else if waited > 32.0 {
+            ads.phase = AdPhase::Error(1.2);
+            info!("pong: rewarded ad timed out waiting for AdResult");
+        } else {
+            ads.phase = AdPhase::Pending(waited + dt);
         }
     }
 

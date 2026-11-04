@@ -1,6 +1,6 @@
 # 适配层契约
 
-本文记录 `addons/bevy-douyin`（tag `adapter-v0.2.2`）对外承诺的行为，以及本示例
+本文记录 `addons/bevy-douyin`（tag `adapter-v0.3.0`）对外承诺的行为，以及本示例
 依赖了其中哪些部分。改适配层或升级 tag 之后，建议对照本文重新验证。
 
 涉及的文件：
@@ -70,24 +70,68 @@ fn host_global(name: &str) -> JsValue {
 默认前缀 `__bevy_douyin_`（`game.js` 的 `globalPrefix` 必须和
 `platforms/douyin/src/host.rs` 的 `GLOBAL_PREFIX` 一致）。
 
+0.3.0 在 0.2 的扁平全局之外，增加了聚合对象和带序号的变更通知：
+
 | 全局 | 类型 | 方向 | 说明 |
 | --- | --- | --- | --- |
-| `Canvas` | `{width, height}` | JS → Rust | 逻辑画布尺寸，单位是画布像素 |
-| `SafeArea` | 见下 | JS → Rust | 安全区 inset（CSS px）、屏幕尺寸、胶囊矩形 |
-| `Theme` | `"dark" \| "light"` | 双向 | 当前主题 |
-| `SetTheme(value)` | `(string) => void` | Rust → JS | 覆盖主题并同步 `Theme` |
-| `ShowAd(kind)` | `(string) => boolean` | Rust → JS | 拉起激励视频，返回是否受理 |
+| `Version` | `string` | JS → Rust | 适配层版本，如 `"0.3.0"` |
+| `Config` | 见下 | JS → Rust | 归一化后的启动配置 |
+| `Layout` | 见下 | JS → Rust | 画布 / 安全区 / 屏幕 / dpr / 序号，一次读全 |
+| `ViewportSeq` | `number` | JS → Rust | 每次尺寸变化 +1 |
+| `Canvas` | `{width, height}` | JS → Rust | 逻辑画布尺寸（0.2 兼容字段） |
+| `SafeArea` | 见下 | JS → Rust | 安全区 + 屏幕 + 胶囊（0.2 兼容字段） |
+| `Theme` | `"dark" \| "light"` | 双向 | 当前生效主题 |
+| `ThemeManual` | `boolean` | JS → Rust | 是否被手动覆盖 |
+| `ThemeSource` | `"system" \| "manual"` | JS → Rust | 主题来源 |
+| `SetTheme(value)` | `(string) => void` | Rust → JS | 手动覆盖，并保持 |
+| `FollowTheme()` | `() => void` | Rust → JS | 清除手动覆盖，恢复跟随系统 |
+| `RequestAd(kind)` | `(string) => number` | Rust → JS | 返回 ticket；`0` = 忙/失败 |
+| `ShowAd(kind)` | `(string) => boolean` | Rust → JS | `RequestAd(kind) > 0` 的兼容包装 |
+| `AdTicket` | `number` | JS → Rust | 当前这一单的票据 |
+| `AdResult` | 见下 | JS → Rust | 终态结果，带同一张 ticket |
 | `AdStatus` | `string` | JS → Rust | `idle/loading/ended/skipped/error/unavailable` |
+| `AdReason` | `string` | JS → Rust | `mock/timeout/show-failed/retry-failed/create-failed/no-ad-unit/...` |
+| `AdLastError` | `string \| null` | JS → Rust | 最近一次广告错误 |
+| `AdMock` | `boolean` | JS → Rust | **这一单**是否走 mock |
+| `AppState` | `"foreground" \| "background"` | JS → Rust | 前后台状态 |
+| `AppStateSeq` | `number` | JS → Rust | 每次前后台切换 +1 |
+| `LastError` | `string \| null` | JS → Rust | 适配层最近一次内部错误 |
 
-`SafeArea` 的字段：
+`Config`：
 
 ```ts
 {
-  left: number, top: number, right: number, bottom: number, // CSS px
-  screenWidth: number, screenHeight: number,               // CSS px
-  menuButton: { left, top, right, bottom, width, height }  // 右上角胶囊，CSS px
+  name, designWidth, designHeight, globalPrefix, storagePrefix,
+  devicePixelRatio, adTimeoutMs, mockAds, adUnitConfigured, automaticResize
 }
 ```
+
+`Layout`：
+
+```ts
+{
+  canvas: { width, height },                    // 画布 px
+  safeArea: {                                   // CSS px
+    left, top, right, bottom,
+    width, height, statusBarHeight,
+    screenWidth, screenHeight,
+    hasMenuButton, menuButton: null | { left, top, right, bottom, width, height }
+  },
+  screen: { width, height },
+  devicePixelRatio,
+  seq
+}
+```
+
+`AdResult`：
+
+```ts
+{ ticket, kind, status, reason, isEnded, mock }
+```
+
+`SafeArea.menuButton` 可能为 `null`（旧机型/模拟器）。有值时 `bottom` 是**胶囊
+底边**，不是高度。示例用 `max(safe.top, menuButton.bottom)` 作为顶部内缩，
+否则长屏手机上计分条会压到胶囊。
 
 `menuButton.bottom` 是**胶囊底边**，不是高度。示例用
 `max(safe.top, menuButton.bottom)` 作为顶部内缩，否则长屏手机上计分条会压到胶囊。
@@ -111,10 +155,11 @@ H = round(max(designH, designW * screenH / screenW))
 | 竖屏长手机（如 393×852） | 720×1561，宽度保持 720，高度变高 |
 | 4:3 平板 | 保持高度 1280，宽度变宽 |
 
-所以**不要**在 Rust 里写死 `720×1280`。本示例在启动时读 `Canvas`：
+所以**不要**在 Rust 里写死 `720×1280`。本示例在启动时优先读 `Layout`，
+旧版本适配层则回退到 `Canvas`：
 
 ```rust
-let (canvas_w, canvas_h) = host.canvas();
+let (canvas_w, canvas_h) = host.canvas(); // Layout.canvas，失败再读 Canvas
 WindowResolution::new(canvas_w, canvas_h)
 ```
 
@@ -133,6 +178,19 @@ Projection::Orthographic(OrthographicProjection {
 > 适配层把 `devicePixelRatio` 固定为 1（或配置值），所以在本管线里
 > `窗口逻辑尺寸 == 画布像素尺寸`。模拟器实测：`phys=720×1561 logical=720×1561
 > scale=1`，正交投影 `area = -360..360 × -780.5..780.5`。
+
+### 尺寸会变：`ViewportSeq`
+
+`tt.onWindowResize` 触发时，适配层会重新推导画布、调整 backing store 和
+`window.innerWidth/Height`、重发 `Canvas`/`SafeArea`/`Layout`、递增
+`ViewportSeq`，并抛 `resize` 事件。0.3 的约定是：
+
+- 启动后读一次 `Layout`；
+- 运行中轮询 `ViewportSeq`（示例在 `sync_environment` 里做）；
+- 序号变化才重建布局，不要每帧读一堆全局。
+
+本示例为了保持代码小，暂时在启动时把布局固定下来；真机上如果会旋转/分屏，
+按上面的约定重建 `View`、相机和场地即可。
 
 ---
 
@@ -201,13 +259,15 @@ if let Some((then, at)) = *last_tap {
 
 ## 6. 主题
 
-- 启动时读取 `Theme`；
+- 启动时读取 `Theme` / `ThemeManual` / `ThemeSource`；
 - 适配层每 **4000ms** 轮询 `tt.getSystemInfoSync().theme`，也监听
   `tt.onThemeChange`；
-- Rust 调 `SetTheme("light" | "dark")` 可覆盖，并立即更新 `Theme` 全局；
-- 示例把用户选择写进 `localStorage` 的 `pong.theme`，下次启动优先恢复；
-  `sync_environment` 每 30 帧（约 0.5 秒）检查一次 `Theme` 是否被系统改掉，
-  **手动切换过之后（`Look.custom = true`）就不再跟随系统**。
+- `SetTheme("light" | "dark")` 会把手动值固定下来（`ThemeManual = true`），
+  之后系统主题变化不会覆盖它；
+- `FollowTheme()` 清除手动值，恢复跟随系统；
+- 示例把用户选择写进 `localStorage` 的 `theme`（实际键 `pong.theme`），启动时
+  若存档是手动值就调用 `SetTheme`；`sync_environment` 每 30 帧（约 0.5 秒）
+  检查一次 `Theme`，**手动切换过之后（`Look.custom = true`）就不再跟随系统**。
 
 `paint_scene` 每帧根据 `Look.theme` 取调色板，并同步 `ClearColor`，所以切换是
 立即生效的，不需要重建任何实体。
@@ -216,58 +276,69 @@ if let Some((then, at)) = *last_tap {
 
 ## 7. 激励视频
 
-`ShowAd(kind)` 是**同步返回 boolean** 的：
+0.3 起用**票据**关联请求与结果：
 
-| 情况 | 返回 | `AdStatus` |
+```js
+const ticket = RequestAd("rewarded"); // > 0 受理；0 = 忙/失败
+// 之后轮询：
+AdTicket; // 当前票据
+AdResult; // { ticket, kind, status, reason, isEnded, mock } 或 null
+```
+
+| 情况 | `RequestAd` | `AdResult` |
 | --- | --- | --- |
-| 没有 `adUnitId`，默认 `mockAds !== false` | `true`（适配层 mock） | `loading` → `ended`（默认） |
-| 没有 `adUnitId`，`mockAds: false` | `false` | `unavailable` |
-| 有广告位，拉起成功 | `true` | `loading` → `ended` / `skipped` |
-| 拉起失败 | `true`（内部会重试 load） | `error` |
+| 没有 `adUnitId`，默认 `mockAds !== false` | ticket > 0 | `ended` / `skipped` / `error`（默认 `ended`，600ms） |
+| 没有 `adUnitId`，`mockAds: false` | `0` | 无；`AdStatus=unavailable`，`AdReason=no-ad-unit` |
+| 有广告位，拉起成功 | ticket > 0 | `ended` / `skipped` / `error` |
+| 已有请求在处理 | `0` | 上一单继续 |
+| 广告位创建失败 | `0` | `error`，`reason=create-failed` |
+| 超过 `adTimeoutMs`（默认 30s） | ticket > 0 | `error`，`reason=timeout` |
 
-`onClose` 会发布 `ended`（看完）或 `skipped`（中途关闭）；`onError` 发布 `error`。
+适配层内部保证：
 
-适配层 0.2.2 起**内置 mock**：`AdMock` 会变成 `true`，默认 600ms 后发布 `ended`。
-可用 `mockAdDelay`（毫秒）、`mockAdResult`（`ended` / `skipped` / `error`）、
-`mockAds: false`（关闭）控制。真实广告拉起时 `AdMock` 为 `false`。
+- 旧 ticket 的迟到回调不会覆盖新一单；
+- mock 的定时器也校验 ticket，不会和真实广告串台；
+- `AdResult.isEnded` 已经替你判断了 `status === "ended" && reason !== "timeout"`。
 
 本示例的策略（`Ads` 资源）：
 
 ```
 点击胶囊
-  ├─ ShowAd() == true  → AdPhase::Pending，轮询 AdStatus
-  │                        ended      → 给奖励（真实广告或适配层 mock 都可能）
-  │                        skipped    → 取消
-  │                        error      → 取消
-  │                        超时 30s   → 取消
-  └─ ShowAd() == false → AdPhase::Mock(0.9s) → 给奖励（本地兜底）
+  ├─ RequestAd() > 0 → 记录 ticket，AdPhase::Pending
+  │                      AdResult.ticket == 本单
+  │                        ended              → 给奖励
+  │                        skipped / error    → 取消
+  │                      32s 本地兜底         → 取消（适配层 30s 已先报 timeout）
+  └─ RequestAd() == 0 → AdPhase::Mock(0.9s) → 给奖励（仅 mockAds:false 等拒绝场景）
 ```
-
-适配层 mock 本身不上屏、不阻塞输入；真机接真实广告位时只改 `game.js` 的
-`AD_UNIT_ID`，Rust 侧与游戏状态机都不变。
 
 奖励是 8 秒慢动作：`Time<Virtual>::set_relative_speed(0.45)`，用 `Time<Real>`
 计时，避免慢动作把自己的倒计时也拖慢。配置真实广告位只需要改 `game.js` 的
 `AD_UNIT_ID`，Rust 侧无需改动。
-
----
 
 ## 8. 存储
 
 `window.localStorage` / `sessionStorage` 是同一个对象，底层落到
 `tt.setStorageSync/getStorageSync`，支持 `getItem/setItem/removeItem/clear`。
 
-示例的键：
+`game.js` 配置了 `storagePrefix: 'pong.'`，Rust 侧的 key 不带前缀：
 
-| key | 内容 |
-| --- | --- |
-| `pong.best_rally` | 最高连续对拉 |
-| `pong.wins.ai` | AI 胜场 |
-| `pong.wins.player` | 玩家胜场 |
-| `pong.theme` | `dark` / `light` |
+| Rust key | 实际存储 key | 内容 |
+| --- | --- | --- |
+| `best_rally` | `pong.best_rally` | 最高连续对拉 |
+| `wins.ai` | `pong.wins.ai` | AI 胜场 |
+| `wins.player` | `pong.wins.player` | 玩家胜场 |
+| `theme` | `pong.theme` | `dark` / `light` |
 
-写入是同步的，分数变化时直接 `setItem` 即可，量很小，不需要节流。真机冷启动后
-读回验证过一次：日志会打印 `pong: best rally N`。
+前缀带来两个好处：
+
+1. `getItem` 只暴露本游戏的 key（`_load` 按前缀过滤）；
+2. `clear()` 只清 `pong.` 下的键，不会顺手删掉 `__boot_notes` 或同容器里
+   其他小游戏的数据。
+
+不设 `storagePrefix` 时，`clear()` 只删除适配层自己写过的 key。写入是同步的，
+分数变化时直接 `setItem` 即可，量很小，不需要节流。真机冷启动后读回验证过一次：
+日志会打印 `pong: best rally N`。
 
 ---
 
@@ -285,10 +356,12 @@ if let Some((then, at)) = *last_tap {
 
 ## 10. 升级适配层时重点回归
 
-1. `Canvas` / `SafeArea` 字段是否变化（尤其 `menuButton`）；
-2. `ShowAd` 的返回值语义和 `AdStatus` 枚举；
+1. `Canvas` / `SafeArea` / `Layout` 字段是否变化（尤其 `menuButton` 和 `seq`）；
+2. `RequestAd` 的 ticket 语义、`AdResult` 字段和 `AdStatus` 枚举；
 3. 指针是否仍然是 `offsetX/offsetY` + `devicePixelRatio = 1`；
-4. `patch_glue.py` 是否仍匹配 wasm-bindgen 0.2.129 的输出；
-5. `tools/build.sh` 的 wasm-opt 参数是否仍排除 `--all-features`。
+4. `ThemeManual` / `FollowTheme` 是否仍然区分"手动"和"跟随"；
+5. `storagePrefix` 的过滤和 `clear()` 范围；
+6. `patch_glue.py` 是否仍匹配 wasm-bindgen 0.2.129 的输出；
+7. `tools/build.sh` 的 wasm-opt 参数是否仍排除 `--all-features`。
 
 升级后至少跑一遍 [device-checklist.md](device-checklist.md) 的模拟器部分。

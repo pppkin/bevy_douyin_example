@@ -6,7 +6,7 @@
 ```
 platforms/douyin/src/
 ├── main.rs   启动：窗口、插件、渲染容错、相机
-├── host.rs   平台桥：Canvas / SafeArea / Theme / ShowAd / localStorage
+├── host.rs   平台桥：Layout / Theme / RequestAd / AdResult / localStorage
 ├── game.rs   玩法：布局、输入、物理、计分、调色板、广告状态机
 └── probe.rs  诊断：probe 开关、panic 弹窗、内存日志
 ```
@@ -66,7 +66,10 @@ Window {
 地作为 Bevy `Resource` 跨线程使用。
 
 ```rust
-pub struct Host { canvas_w: f32, canvas_h: f32, safe: SafeArea }
+pub struct Host {
+    canvas_w: f32, canvas_h: f32, safe: SafeArea,
+    version: String, viewport_seq: u32, device_pixel_ratio: f32,
+}
 pub struct View {
     width: f32, height: f32,
     inset_left/top/right/bottom: f32,
@@ -74,6 +77,9 @@ pub struct View {
     px_to_world: f32,
 }
 ```
+
+启动时优先读 `Layout`（`canvas` / `safeArea` / `seq` / `devicePixelRatio`），读不到
+再回退到 0.2 的 `Canvas` + `SafeArea`。这样同一份 Host 可以跑 0.2 / 0.3 两代适配层。
 
 ### 布局推导
 
@@ -115,10 +121,16 @@ pub fn pointer(&self, canvas_pos: Vec2) -> Vec2 {
 | --- | --- |
 | `canvas() -> (u32, u32)` | 画布尺寸，用于创建窗口 |
 | `view() -> View` | 布局 |
+| `version() / viewport_seq() / device_pixel_ratio()` | 适配层版本与视口状态，启动日志用 |
 | `theme() -> Option<Theme>` | 读 `Theme` 全局 |
-| `set_theme(Theme)` | 调 `SetTheme`，覆盖并同步 |
-| `show_ad() -> bool` | 调 `ShowAd("rewarded")`，false 表示无广告位 |
-| `ad_status() -> Option<String>` | 读 `AdStatus` |
+| `theme_manual() -> bool` | 是否被手动覆盖 |
+| `set_theme(Theme)` | 调 `SetTheme`，覆盖并保持 |
+| `follow_theme()` | 调 `FollowTheme`，恢复跟随系统 |
+| `request_ad() -> u32` | 调 `RequestAd("rewarded")`，返回 ticket；0 = 忙/失败 |
+| `ad_result() -> Option<AdResult>` | 读 `AdResult`，含 ticket/status/reason/mock |
+| `ad_mock() / ad_last_error()` | 诊断用 |
+| `app_state() -> String` | `foreground` / `background` |
+| `ad_status() -> Option<String>` | 兼容字段，读 `AdStatus` |
 | `load_u32 / save_u32 / load_str / save_str` | 走 shim `localStorage` |
 
 非 wasm 构建（`cargo check`、IDE）返回 720×1280、无安全区、无存储，所有平台调用
@@ -139,7 +151,7 @@ pub fn pointer(&self, canvas_pos: Vec2) -> Vec2 {
 | `Rng` | 32 位 LCG，发球角度用；不引入 `rand` |
 | `Pointer` | 最近一次指针位置与 idle 时间 |
 | `Effects` | 慢动作剩余秒数 |
-| `Ads` | 广告状态机：`Idle / Pending / Mock / Error` |
+| `Ads` | 广告状态机 + 当前票据：`Idle / Pending / Mock / Error`，`ticket: u32` |
 | `Look` | 当前主题、是否用户手动覆盖 |
 | `Themed`（组件） | 精灵的语义角色，`paint_scene` 据此上色 |
 | `Role` | `Frame/Line/Player/Ai/Ball/PipOff/Chip/ChipIcon/Accent/Record` |
@@ -157,7 +169,7 @@ pub fn pointer(&self, canvas_pos: Vec2) -> Vec2 {
 | `update_ai` | 预测落点 + 摆动 → 左拍，速度随比分/回合提升，上限 980/s |
 | `step_ball` | 发球、子步进物理、挡板反弹、计分、拖尾、胜负 |
 | `handle_taps` | 主题按钮、广告胶囊；触摸/鼠标去重 |
-| `sync_environment` | 每 30 帧跟随系统主题（手动切换后停止） |
+| `sync_environment` | 每 30 帧跟随系统主题（手动切换后停止）；按 `AppState` 暂停虚拟时钟 |
 | `tick_effects` | 慢动作计时、广告状态机推进、闪光衰减 |
 | `paint_scene` | 按主题上色、更新计分块/进度条/胜者边框 |
 
@@ -225,7 +237,9 @@ bottom = -H/2 + inset_bottom + 118
 - 局末 `Over` 阶段边框染成胜者颜色，球隐藏；
 - 赢一局后胜场持久化，然后比分归零。
 
-存档键：`pong.best_rally`、`pong.wins.ai`、`pong.wins.player`、`pong.theme`。
+存档键（Rust 侧）：`best_rally`、`wins.ai`、`wins.player`、`theme`。`game.js` 配了
+`storagePrefix: 'pong.'`，所以实际落盘是 `pong.best_rally` 等；换前缀不会和
+其他游戏串数据。
 写入点只有三处：刷新最高连击、赢一局、切换主题。
 
 ### 3.7 主题与调色板
@@ -239,16 +253,19 @@ chip/chip_icon/accent/warn`。`paint_scene` 同时设置 `ClearColor`，所以�
 ### 3.8 广告状态机
 
 ```
-Idle ──点击──> ShowAd() true ──> Pending ──AdStatus ended──> 奖励
-                    │                     ├─ skipped/error ─> Error(1.2s)
-                    │                     └─ 30s 超时 ───────> Error(1.2s)
-                    └─ false ──> Mock(0.9s) ──> 奖励
+Idle ──点击──> RequestAd() > 0 ──> Pending(ticket) ──AdResult.ticket==ticket──> 奖励
+                    │                                ├─ skipped/error ───────> Error
+                    │                                └─ 32s 本地兜底 ────────> Error
+                    └─ 0（忙/失败）──> Mock(0.9s) ──> 奖励
 Error(t) ──t 归零──> Idle
 ```
 
-适配层 0.2.2 起，空 `adUnitId` 会由适配层返回 `true` 并异步发布
-`loading → ended`，因此示例走的是上面的 `Pending` 分支；`AdPhase::Mock(0.9s)`
-只是 `ShowAd` 返回 `false`（例如 `mockAds: false`）时的本地兜底。
+适配层 0.2.2 起，空 `adUnitId` 会由适配层 mock 并异步发布 `loading → ended`；
+0.3 起用 `RequestAd` 返回 ticket，`AdResult` 带回同一张 ticket，`tick_effects`
+只接受 `result.ticket == ads.ticket` 的结果，避免迟到回调发错奖励。适配层还会
+在 `adTimeoutMs`（默认 30s）后主动报 `error/timeout`；示例保留 32s 本地兜底，
+用于极端情况下全局读取失败。`AdPhase::Mock(0.9s)` 只是 `RequestAd` 返回 0
+（例如 `mockAds: false`）时的本地兜底。
 
 奖励 = `fx.slowmo = 8.0`，`tick_effects` 把 `Time<Virtual>` 的
 `relative_speed` 设为 0.45。倒计时用 `Time<Real>`，否则慢动作会把自己的 8 秒

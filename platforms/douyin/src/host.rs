@@ -5,12 +5,15 @@
 //!
 //! | 全局（默认前缀 `__bevy_douyin_`） | 方向 | 内容 |
 //! | --- | --- | --- |
-//! | `Canvas` | JS → Rust | 逻辑画布尺寸 `{width, height}` |
-//! | `SafeArea` | JS → Rust | 安全区 inset、屏幕尺寸、胶囊按钮矩形 |
-//! | `Theme` | 双向 | `"dark"` / `"light"` |
-//! | `SetTheme(value)` | Rust → JS | 覆盖系统主题 |
-//! | `AdStatus` | JS → Rust | `idle/loading/ended/skipped/error/unavailable` |
-//! | `ShowAd(kind)` | Rust → JS | 拉起激励视频，返回是否成功受理 |
+//! | `Version` | JS → Rust | 适配层版本，如 `"0.3.0"` |
+//! | `Layout` | JS → Rust | `{canvas, safeArea, screen, devicePixelRatio, seq}` |
+//! | `Canvas` / `SafeArea` | JS → Rust | 兼容 0.2 的扁平版本；0.3 仍会发布 |
+//! | `Theme` / `ThemeManual` / `ThemeSource` | JS → Rust | 当前主题、是否手动覆盖、来源 |
+//! | `SetTheme(value)` / `FollowTheme()` | Rust → JS | 覆盖主题 / 恢复跟随系统 |
+//! | `RequestAd(kind)` | Rust → JS | 拉起激励视频，返回 ticket（0 表示失败/忙） |
+//! | `AdTicket` / `AdResult` / `AdStatus` | JS → Rust | 票据与最终结果，用于关联回调 |
+//! | `AppState` / `AppStateSeq` | JS → Rust | 前台/后台及变化序号 |
+//! | `ViewportSeq` | JS → Rust | 画布/安全区变化序号 |
 //!
 //! 注意：抖音的 wasm 运行时里 `eval` 不可用（`TypeError: eval is not a
 //! function`），而 `GameGlobal` 也不在 wasm 的全局对象上；适配层会把 shim
@@ -37,6 +40,9 @@ pub struct SafeArea {
     pub screen_height: f32,
     /// 右上角胶囊（菜单按钮）的底边，CSS px；没有胶囊时为 0。
     pub menu_bottom: f32,
+    /// 状态栏高度，CSS px（`inset_top` 已经包含它，这里保留原始值供调试）。
+    #[allow(dead_code)]
+    pub status_bar: f32,
 }
 
 /// 由宿主画布/安全区推导出的世界坐标系布局。
@@ -102,6 +108,9 @@ pub struct Host {
     canvas_w: f32,
     canvas_h: f32,
     safe: SafeArea,
+    version: String,
+    viewport_seq: u32,
+    device_pixel_ratio: f32,
 }
 
 impl Default for Host {
@@ -116,30 +125,46 @@ impl Host {
     pub fn new() -> Self {
         #[cfg(target_arch = "wasm32")]
         {
-            let canvas = host_global("Canvas");
+            // 0.3 起优先读聚合后的 `Layout`（canvas + safeArea + screen +
+            // devicePixelRatio + seq）。`Canvas`/`SafeArea` 仍然发布，作为
+            // 兼容 0.2 的退路。
+            let layout = host_global("Layout");
+            let viewport_seq = number(&layout, "seq").unwrap_or(0.0) as u32;
+            let dpr = number(&layout, "devicePixelRatio").unwrap_or(1.0);
+
+            let canvas = choose_object(&layout, "canvas", "Canvas");
             let canvas_w = number(&canvas, "width").unwrap_or(DESIGN_WIDTH);
             let canvas_h = number(&canvas, "height").unwrap_or(1280.0);
 
-            let area = host_global("SafeArea");
+            let area = choose_object(&layout, "safeArea", "SafeArea");
+            let menu = js_sys::Reflect::get(&area, &JsValue::from_str("menuButton"))
+                .unwrap_or(JsValue::UNDEFINED);
+            let screen = js_sys::Reflect::get(&layout, &JsValue::from_str("screen"))
+                .unwrap_or(JsValue::UNDEFINED);
             let safe = SafeArea {
                 left: number(&area, "left").unwrap_or(0.0),
                 top: number(&area, "top").unwrap_or(0.0),
                 right: number(&area, "right").unwrap_or(0.0),
                 bottom: number(&area, "bottom").unwrap_or(0.0),
-                screen_width: number(&area, "screenWidth").unwrap_or(canvas_w),
-                screen_height: number(&area, "screenHeight").unwrap_or(canvas_h),
-                menu_bottom: number(
-                    &js_sys::Reflect::get(&area, &JsValue::from_str("menuButton"))
-                        .unwrap_or(JsValue::UNDEFINED),
-                    "bottom",
-                )
-                .unwrap_or(0.0),
+                screen_width: number(&area, "screenWidth")
+                    .or_else(|| number(&screen, "width"))
+                    .unwrap_or(canvas_w),
+                screen_height: number(&area, "screenHeight")
+                    .or_else(|| number(&screen, "height"))
+                    .unwrap_or(canvas_h),
+                menu_bottom: number(&menu, "bottom").unwrap_or(0.0),
+                status_bar: number(&area, "statusBarHeight").unwrap_or(0.0),
             };
 
             Self {
                 canvas_w,
                 canvas_h,
                 safe,
+                version: host_global("Version")
+                    .as_string()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                viewport_seq,
+                device_pixel_ratio: dpr,
             }
         }
 
@@ -153,12 +178,28 @@ impl Host {
                     screen_height: 1280.0,
                     ..default()
                 },
+                version: "dev".to_string(),
+                viewport_seq: 0,
+                device_pixel_ratio: 1.0,
             }
         }
     }
 
     pub fn canvas(&self) -> (u32, u32) {
         (self.canvas_w as u32, self.canvas_h as u32)
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// 画布/安全区变化序号；启动后如果适配层再次 resize，这个值会增长。
+    pub fn viewport_seq(&self) -> u32 {
+        self.viewport_seq
+    }
+
+    pub fn device_pixel_ratio(&self) -> f32 {
+        self.device_pixel_ratio
     }
 
     pub fn view(&self) -> View {
@@ -179,7 +220,20 @@ impl Host {
         }
     }
 
-    /// 覆盖系统主题（同时会更新适配层里的 `Theme` 全局）。
+    /// 适配层当前是否处于“手动主题”模式。
+    #[allow(dead_code)]
+    pub fn theme_manual(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            host_global("ThemeManual").as_bool().unwrap_or(false)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    }
+
+    /// 覆盖系统主题：0.3 起这个选择会一直保留，直到显式 `FollowTheme()`。
     pub fn set_theme(&self, theme: Theme) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -192,24 +246,108 @@ impl Host {
         let _ = theme;
     }
 
-    /// 拉起一次激励视频。`false` 表示适配层/宿主没有可用的广告位，
-    /// 游戏应当走本地 mock 流程（示例里是直接给奖励）。
-    pub fn show_ad(&self) -> bool {
+    /// 恢复跟随系统主题（清除手动覆盖）。
+    #[allow(dead_code)]
+    pub fn follow_theme(&self) {
         #[cfg(target_arch = "wasm32")]
         {
-            let show = host_global("ShowAd");
-            if let Ok(show) = show.dyn_into::<js_sys::Function>() {
-                return show
+            let follow = host_global("FollowTheme");
+            if let Ok(follow) = follow.dyn_into::<js_sys::Function>() {
+                let _ = follow.call0(&JsValue::UNDEFINED);
+            }
+        }
+    }
+
+    /// 请求一次激励视频。返回 ticket；0 表示适配层正忙或拉起失败。
+    ///
+    /// 0.3 起优先用 `RequestAd` 拿到票据，再等待 `AdResult` 里同一张票据的
+    /// 最终状态，避免“上一个广告的 close 回调”误触发本次奖励。
+    pub fn request_ad(&self) -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let request = host_global("RequestAd");
+            if let Ok(request) = request.dyn_into::<js_sys::Function>() {
+                return request
                     .call1(&JsValue::UNDEFINED, &JsValue::from_str("rewarded"))
                     .ok()
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
             }
-            false
+            0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0
+        }
+    }
+
+    /// 适配层最近一次广告的最终结果；进行中时为 `None`。
+    pub fn ad_result(&self) -> Option<AdResult> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let value = host_global("AdResult");
+            if !value.is_object() {
+                return None;
+            }
+            Some(AdResult {
+                ticket: number(&value, "ticket").unwrap_or(0.0) as u32,
+                status: string(&value, "status").unwrap_or_default(),
+                reason: string(&value, "reason").unwrap_or_default(),
+                is_ended: js_sys::Reflect::get(&value, &JsValue::from_str("isEnded"))
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                mock: js_sys::Reflect::get(&value, &JsValue::from_str("mock"))
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            None
+        }
+    }
+
+    /// 适配层是否启用了本地 mock 广告（`Config.mockAds`，不是单次结果）。
+    pub fn ad_mock(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let config = host_global("Config");
+            js_sys::Reflect::get(&config, &JsValue::from_str("mockAds"))
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             false
+        }
+    }
+
+    /// 最近一次广告错误原因，例如 `timeout` / `show-failed`。
+    pub fn ad_last_error(&self) -> Option<String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            host_global("AdLastError").as_string()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            None
+        }
+    }
+
+    /// 前台/后台状态：`foreground` / `background`。
+    pub fn app_state(&self) -> String {
+        #[cfg(target_arch = "wasm32")]
+        {
+            host_global("AppState")
+                .as_string()
+                .unwrap_or_else(|| "foreground".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            "foreground".to_string()
         }
     }
 
@@ -247,6 +385,16 @@ impl Host {
             &JsValue::from_str(value),
         );
     }
+}
+
+/// 适配层 0.3 的广告最终结果。`ticket` 必须和本次请求的票据一致才算数。
+#[derive(Debug, Clone)]
+pub struct AdResult {
+    pub ticket: u32,
+    pub status: String,
+    pub reason: String,
+    pub is_ended: bool,
+    pub mock: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +450,24 @@ fn number(obj: &JsValue, key: &str) -> Option<f32> {
         .ok()
         .and_then(|v| v.as_f64())
         .map(|v| v as f32)
+}
+
+/// 优先从 `Layout` 里取嵌套对象，取不到再读旧的扁平全局。
+#[cfg(target_arch = "wasm32")]
+fn choose_object(parent: &JsValue, key: &str, fallback: &str) -> JsValue {
+    let nested = js_sys::Reflect::get(parent, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+    if nested.is_object() {
+        nested
+    } else {
+        host_global(fallback)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn string(obj: &JsValue, key: &str) -> Option<String> {
+    js_sys::Reflect::get(obj, &JsValue::from_str(key))
+        .ok()
+        .and_then(|v| v.as_string())
 }
 
 /// 调用 `window.localStorage.<method>(a, b)`。

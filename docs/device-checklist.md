@@ -12,7 +12,7 @@ git clone --recurse-submodules <本仓库地址>
 cd bevy_douyin_example
 
 git submodule status
-#  da4addad8e5698b9bff8db8fef9922be2fc3a1c6 addons/bevy-douyin (adapter-v0.2.2)
+#  74c563f8c1679ebb0000187605d024791b3b8dea addons/bevy-douyin (adapter-v0.3.0)
 ```
 
 预期：版本号前**没有** `-` 或 `+`。`-` 表示没初始化，`+` 表示 submodule 的
@@ -23,7 +23,7 @@ HEAD 和父仓库记录不一致。
 ```bash
 git submodule update --init --recursive
 # 如果之前手动 checkout 过别的分支：
-git -C addons/bevy-douyin checkout adapter-v0.2.2
+git -C addons/bevy-douyin checkout adapter-v0.3.0  # 74c563f
 git add addons/bevy-douyin
 ```
 
@@ -80,7 +80,7 @@ brew install esbuild     # 可选
 ```
 -rw-r--r--  ... 63K  platforms/douyin/package/pong.js
 -rw-r--r--  ... 2.3M  platforms/douyin/package/pong.wasm.br
--rw-r--r--  ... 24K  platforms/douyin/package/runtime/adapter.js
+-rw-r--r--  ... 27K  platforms/douyin/package/runtime/adapter.js
 -rw-r--r--  ... 2.0K platforms/douyin/package/runtime/bootstrap.js
 ```
 
@@ -131,12 +131,16 @@ douyinide simulator-compile -c OpenCode --window-id <id>
 底部黄色广告胶囊。控制台应有类似：
 
 ```
+runtime installed: canvas=720x1561 screen=393x852 TTWebAssembly=true probe=off
+theme: manual dark
+pong: adapter 0.3.0 (dpr 1, viewport seq 1, ad mock true)
 pong: canvas 720x1561 -> world 720x1561, safe insets 0.0/185.0/0.0/62.3,
       best rally 0, wins AI 0 / player 0
+pong: app foreground, virtual clock resumed
 ```
 
-（实际是一行日志，这里为了排版换行。数值随机型变化；顶部 inset 应该明显大于 0，
-说明胶囊避让生效。）
+（最后一行较长，这里为了排版换行。数值随机型变化；顶部 inset 应该明显大于 0，
+说明胶囊避让生效。`theme: manual dark` 是因为存档里保存了手动主题。）
 
 逐项检查：
 
@@ -146,11 +150,11 @@ pong: canvas 720x1561 -> world 720x1561, safe insets 0.0/185.0/0.0/62.3,
 | 2 | 点击左上角方块 | 主题在深/浅之间切换，**只切换一次** |
 | 3 | 再点一次 | 切回，控制台各出现一条 `pong: theme ->` |
 | 4 | 重开小游戏 | 主题保持上次选择 |
-| 5 | 点击底部胶囊 | 无广告位时：适配层 `ad mock kind=rewarded result=ended delay=600ms` → `ad mock finished: ended` → 游戏 `pong: rewarded ad ended, slow-mo granted`，球明显变慢 8 秒 |
+| 5 | 点击底部胶囊 | 无广告位时：适配层 `ad mock kind=rewarded result=ended delay=600ms ticket=1` → `ad result ticket=1 status=ended reason=mock` → `ad mock finished: ended`；游戏 `pong: rewarded ad requested ticket=1` → `pong: rewarded ad ended ticket=1 mock=true reason=mock, slow-mo granted`，球明显变慢 8 秒 |
 | 6 | 挂机 1.5s | 右拍自动跟球（模拟器没有指针事件时的兜底） |
 | 7 | 打满 7 分 | 边框闪胜者色，2.8s 后比分归零，胜场 +1 |
 | 8 | 重开小游戏 | 胜场/最高连击保留 |
-| 9 | 系统切深色/浅色（工具菜单） | 未手动切换过时，游戏在约 0.5s 内跟随 |
+| 9 | 系统切深色/浅色（工具菜单） | 未手动切换过时，约 4 秒内跟随（适配层轮询间隔） |
 
 ### 截图与取色验证（可选）
 
@@ -220,7 +224,7 @@ diag: update #1 t=0.016 cams=1 sprites=27 clear=(0.035,0.047,0.086,1) win=720x15
 - [ ] 真机跑过"切后台 / 断网 / 低电量"三种情况；
 - [ ] 主题、存档、广告、触摸四项回归通过；
 - [ ] `git status` 里没有误提交 `pong.js` / `pong.wasm.br` / `runtime/`；
-- [ ] submodule 指向 `adapter-v0.2.2`（或你验证过的新 tag）。
+- [ ] submodule 指向 `adapter-v0.3.0`（或你验证过的新 tag）。
 
 ---
 

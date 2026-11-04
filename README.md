@@ -5,7 +5,7 @@
 submodule 的形式引入：
 
 ```
-addons/bevy-douyin  →  https://gitee.com/pppkin/bevy_douyin  (tag: adapter-v0.2.2)
+addons/bevy-douyin  →  https://gitee.com/pppkin/bevy_douyin  (tag: adapter-v0.3.0)
 ```
 
 本仓库是适配层的**配套示例**：它刻意保持小，但把"从零把一个 Bevy 游戏接到抖音"
@@ -29,15 +29,18 @@ addons/bevy-douyin  →  https://gitee.com/pppkin/bevy_douyin  (tag: adapter-v0.
   计分条永远在右上角胶囊下方。
 - **三种输入**：触摸拖动、模拟器鼠标、键盘 `↑/↓`（或 `W/S`）。触摸与合成鼠标
   事件会去重，一次点击只触发一次。
-- **主题**：启动读取系统主题，每 4 秒跟随系统变化；左上角按钮可手动切换并持久化。
+- **主题**：启动读取系统主题，未手动选择时每 4 秒跟随；左上角按钮切换后由适配层
+  记为手动值（`ThemeManual`），不会又被系统改回去，并写入存档。
 - **激励视频**：底部胶囊是广告入口。没有配置广告位时由适配层内置 mock 返回
   `loading → ended`（默认 600ms，可用 `mockAdDelay` 调整），配置真实 `adUnitId`
-  后同一套代码走真实激励视频，Rust 侧不用改。游戏自己还保留了 `ShowAd() == false`
-  时的 0.9 秒本地兜底（例如显式设置 `mockAds: false`）。
+  后同一套代码走真实激励视频，Rust 侧不用改。0.3 起 `RequestAd` 返回 ticket，
+  `AdResult` 回传同一张 ticket，适配层还会在 30 秒无终态时主动报 `timeout`；
+  游戏保留 `RequestAd() == 0` 时的 0.9 秒本地兜底（例如 `mockAds: false`）。
 - **纯 Sprite，零资源**：没有图片、字体、音频；分数用 7 个计分块表示，产物只有
   wasm + JS。
 - **本地存档**：最高连续对拉、双方胜场、主题，走适配层的 `localStorage`
-  （底层是 `tt.setStorageSync`），重开小游戏仍在。
+  （底层是 `tt.setStorageSync`），并用 `storagePrefix: 'pong.'` 做命名空间，
+  重开小游戏仍在。
 - **设备诊断**：`GameGlobal.__probe = 1` 时输出每帧/低频诊断日志，panic 弹
   `tt.showModal`（真机 `panic = "abort"` 时控制台经常什么都看不到）。
 
@@ -127,7 +130,7 @@ assets/              有 assets/ 目录时才会出现
 
 ```
 .
-├── addons/bevy-douyin/          适配层 submodule（tag adapter-v0.2.2）
+├── addons/bevy-douyin/          适配层 submodule（tag adapter-v0.3.0）
 ├── build.sh                     构建入口（参数翻译 + 透传）
 ├── rust-toolchain.toml          stable + wasm32 target
 ├── docs/
@@ -153,10 +156,11 @@ assets/              有 assets/ 目录时才会出现
 ```
 game.js
   └─ require('./runtime/bootstrap.js')
-       ├─ adapter.install({ canvas, width, height, globalPrefix, adUnitId })
+       ├─ adapter.install({ canvas, width, height, globalPrefix, storagePrefix, adUnitId })
        │    ├─ 创建 tt.createCanvas()，按屏幕比例推导画布尺寸
        │    ├─ 安装 window / document / WebGL2 / 输入 / 存储 / 主题 shim
-       │    └─ 发布 __bevy_douyin_Canvas / SafeArea / Theme / ShowAd / AdStatus
+       │    └─ 发布 Version / Config / Layout / ViewportSeq / Theme /
+       │       ThemeManual / RequestAd / AdResult / AppState
        └─ require('./pong.js')          ← wasm-bindgen 生成、被 patch_glue.py 改过
             └─ TTWebAssembly.instantiate(解压后的 wasm)
                  └─ Bevy 启动，host.rs 读全局 → 建窗口 → 跑游戏
@@ -185,4 +189,4 @@ game.js
 - 示例的 `adUnitId` 为空，广告由适配层 mock；真广告位需要在抖音后台创建激励视频广告位。
 - 只在抖音开发者工具模拟器完整验证过；真机差异与检查项见
   [docs/device-checklist.md](docs/device-checklist.md)。
-- 适配层固定在 `adapter-v0.2.2`。升级 submodule 后要重新跑一遍设备检查清单。
+- 适配层固定在 `adapter-v0.3.0`。升级 submodule 后要重新跑一遍设备检查清单。
